@@ -1,0 +1,277 @@
+---
+title: "Using AI to Optimize Marketing across Multiple Platforms"
+date: Kayak.com
+output: html_document
+---
+
+```{r, echo=FALSE, warning=FALSE}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(ggplot2)
+  library(gridExtra)
+  library(mboost)
+})
+
+```
+
+*By Emil S. Jørgensen, Imran Kocabiyik and Rasmus N. Velling*
+
+A key aspect behind the success of KAYAK lies in the way we do marketing. Today, our company portfolio consists of 6 brands operating in 60+ countries around the world, and successful marketing strategies are vital to ensure further global expansion. To aid our strategic decisions, we apply a range of advanced analytics tools to measure and compare the performance of different marketing activities. One challenging problem in particular is to ensure that we provide a fair comparison between offline (TV) and online marketing (Facebook, YouTube, etc.) for use in high level budget allocation. To resolve this problem, we developed a customized machine learning framework that measures the individual contribution of each of our activities and uses the evaluation to recommend an **optimal media mix**.
+
+In this post, we provide a glimpse under the hood of our modeling framework — indeed, whereas the effect of some channels seems to be linear by nature, others display strong nonlinear dependency between marketing pressure and revenue impact. Specifically, we illustrate how the [R](https://www.R-project.org/) add-on package [mboost](https://CRAN.R-project.org/package=mboost) can be used to identify nonlinear effects of inputs within the class of **generalized additive (regression) models**.
+
+## Reasons why Marketing Effects are S-shaped
+
+Marketing at KAYAK happens via multiple platforms with complicated interaction effects. As a consequence, isolating the individual contribution of each marketing channel has become an increasingly difficult task. We expect the effect of each channel to have a natural **saturation point** after which the incremental value of posting more money into that particular channel becomes negligible. Moreover, some channels likely require a certain amount of pressure before their effect kicks in, i.e. the pressure has to exceed a certain **threshold** before yielding an effect. Combined, these observations lead to *S*-shaped dynamics, which we visualize below.
+
+### Saturation
+
+Intuitively, we expect that after a certain level of marketing pressure, additional exposure will have less or no further impact on our financial performance. For instance, a user may already have been exposed to one of our ads 20 times within the past week and one would think that, at least on average, any extra exposure would fail to have a real impact. Hence, the saturation concept corresponds to a diminishing effect, going to zero, which we exemplify below:
+
+
+```{r, echo=FALSE}
+ggplot(data = data.frame(
+  x = c(1:100,      110,  120,  130,  200, 1:200),
+  y = c(sqrt(1:100), 10.4, 10.6, 10.7, 10.7, (1:200)*.075),
+  label = c(rep("Saturating channel", times=104), rep("Non-saturating", times=200))
+)) +
+  geom_path(aes(x=x, y=y, color=label)) +
+  labs(title = "Saturating vs. non-saturating channel", x = "Dose (Impressions)", y = "Effect", colour="") +
+  theme(legend.position = "bottom")
+```
+ 
+### Thresholds
+
+Threshold effects, in turn, appear if a certain amount of marketing pressure is needed for a channel to start generating value. By taking competition and noise into account, it makes sense that a **critical mass** is necessary to yield effect — especially on larger platforms. An appropriate analogy would be having to shout louder than the vendor next to you at a street market.
+
+```{r, echo=FALSE}
+ggplot(data = data.frame(
+  x = c(0, 99, 100:300),
+  y = c(0,  0, .00001*(100:300)^3-10),
+  label = "Channel with threshold")
+) +
+  geom_vline(xintercept=100, linetype="dotted") +
+  geom_text(data=data.frame(x=100, event="Threshold"), mapping=aes(x=x, y=5, label=event), size=4, angle=90, vjust=-0.4, hjust=0) +
+  geom_path(aes(x=x, y=y, color=label)) +
+  labs(title="Channel with minimum-threshold for effect" , x = "Dose (impressions)", y = "Effect", colour="") +
+  theme(legend.position = "bottom")
+```
+
+
+## Taking Care of Business
+
+The business problem posed by our Chief Marketing Officer was simple; “Based purely on data, what is the best way to spend our marketing budget for any country in which we operate?”. To answer this question, we set out to identify a function $f(x)$ that, for a given input x, is able to predict our revenue y. Eventually, this lead us to consider so-called generalized additive models (GAMs) — a highly flexible class of regression models that takes as input all factors, we believe have a causal effect on our performance. This includes our own marketing activities, but also external factors such as market dynamics (competitor spendings, seasonal dynamics, macroeconomic growth) and many other categories.
+
+A GAM model has the general form:
+
+
+$$y_t =  \sum_{i=1}^{N} f_i(x_{it}) + \epsilon_t$$
+
+where $t$ denotes time measured in days, $i$ the index of a given input variable (e.g. the amount of TV pressure on that particular day), and $f_i$ the marginal effect due to input $x_i$. A key challenge for analyzing performance across platforms is to simultaneously estimate the functions $f_i$, keeping the possibility of *S*-shaped dynamics in mind.
+
+## A Machine Learning Approach to Estimation
+
+As a team of data engineers and data scientists, one of our main concerns is never to impose too strict assumptions on the data we’re trying to model, and rather let the data “speak for itself”. Although S-shaped effects are intuitively intriguing, reality may be entirely different. Hard coding certain types of behavior should always lead to less belief in the outcome of a model. Luckily modern statistics has our back here!
+
+While GAM models have been around for 30 years, recent research into computational aspects of their application has been a major topic of research only recently. There’s a highly suitable framework for estimating nonlinear effects using a machine learning technique known as **boosting**, which is provided by the R add-on package mboost. In particular, this framework:
+
+1) allows us to specify weak assumptions on the behavior of each individual inputs,
+2) is applicable with high-dimensional inputs and filters inputs with no measurable effect,
+3) is computationally fast!
+
+### An Example using Simulated Data
+[DRUMROLL] This is what you have all been waiting for: how it actually works. In this, very simple and naïve, example, we’ll compare the good-old linear regression with an MBOOST-model (with only very few tweeks) on some simulated data. We’ll simulate the data, so that we know it has nonlinear effects between (some) $x$’s and our outcome $y$.
+
+Imagine we explain sales $y$ by the following:
+
+$$y = .1*x_1 + \frac{20}{(1+ exp^{-.1*(x_2 - 100)})} + \sqrt{x_3} + \epsilon$$
+
+Which means that $x_1$ is linear, $x_2$ is a logistic growth function and $x_3$ is concave. $\epsilon$ is random, normal distributed noise. We'll limit each input to the range 0 to 300.
+
+**The code (R)**
+
+```{r}
+library(tidyverse)
+
+df <- data.frame(
+  x1 = runif(1000, 0, 300),
+  x2 = runif(1000, 0, 300),
+  x3 = runif(1000, 0, 300),
+  e  = rnorm(1000, mean = 0, sd = 2)
+)
+
+df$y <- .1*df$x1 +
+  20/(1+ exp(-.1*(df$x2 - 100))) +
+  sqrt(df$x3) +
+  df$e
+
+test     <- sample(1:nrow(df), 200)
+df_train <- df[-test, ] %>% select(-e)
+df_test  <- df[test, ] %>% select(-e)
+```
+
+### Models fitted
+
+We will do a simple test with two fits: a linear regression and an (almost) out-of-the-box GAM-booster from mboost.
+
+1) Linear regression: $y = \sum_{i}^{N}\beta_i*x_i$
+2) GAM BOOST w. simple, increasing splines: $y = \sum_{i}^{N}f_i(x_i)$ where: $f_i = \textrm{bbs}(x_i, \textrm{knots} = 4, \textrm{degree} = 3)$
+
+Knots determine how many "slices" in the data within which we fit splines. Degree determine the degree of the regression spline. More knots and more degrees will, eventually, lead to overfitting. So these should be tweeked according to the problem at hand.
+
+**The Code**
+
+```{r}
+fit_lm <- lm(y ~ x1 + x2 + x3, data = df_train)
+
+fit_gam <- mboost::gamboost(
+  formula = as.formula(paste0(
+    "y ~ bbs(x1, knots=4, degree=3) + ",
+    "bbs(x2, knots=4, degree=3) + ", 
+    "bbs(x3, knots=4, degree=3)")),
+  data = df_train,
+  control = boost_control(mstop = 2500)
+)
+```
+
+#### Test - predictions vs true value
+
+We have the data split in two: a training and a test set. We want to see how the models fitted on the training set explain the test data.
+
+Our first graph is a plot of the predicted values from the two fits against the "true" values. It generally shows us, that our mboost-model (green dots) seems to come closer to the true values (the blue dots), than the linear regression (red dots) does.
+
+```{r, echo=FALSE, warning=FALSE}
+df_test <- df_test %>% 
+  arrange(y) %>% 
+  data.frame()
+
+df_plot_yy <- data.frame(
+  y = c(
+    df_test$y,
+    predict(fit_lm, newdata = df_test),
+    predict(fit_gam, newdata = df_test)[, 1]),
+  index = c(
+    1:nrow(df_test),
+    1:nrow(df_test),
+    1:nrow(df_test)),
+  Model = c(
+    rep("y, true value", times=nrow(df_test)),
+    rep("Linear regression", times=nrow(df_test)), 
+    rep("MBOOST", times=nrow(df_test)))
+)
+
+ggplot(data = df_plot_yy) +
+  labs(title="Predicted value vs. true") +
+  geom_point(aes(x=index, y=y, color=Model)) +
+  xlab("Observations ordered by y")
+```
+
+We could also illustrate this with the distribution of the two models' error terms.
+
+```{r, echo=FALSE, warning=FALSE}
+ggplot(data = data.frame(
+  Error = c(
+    predict(fit_lm, newdata = df_test) - df_test$y, 
+    predict(fit_gam, newdata = df_test) - df_test$y
+  ), 
+  Model = c(
+    rep("Linear regression", times=nrow(df_test)), 
+    rep("MBOOST", times=nrow(df_test))
+  )
+), aes(Error, fill = Model)) + geom_histogram(alpha = 0.5, aes(y = ..density..), position = 'identity', bins=30) +
+  ggtitle("Distribution of errors")
+```
+
+The overall conclusion seems to be, that MBOOST comes closer. But it is also worth noting, that it seems to capture the non-linearity better. Looking at the distribution of the error terms, we see that GAM generally produces lower errors, and perhaps also more "normal" errors.
+
+#### Stylized fits
+
+Of further interest is also how well MBOOST captures the individual channels' potential non-linearities against the linear model, which does nothing in this direction:
+
+**Stylized fit: $x_1$**
+
+The "true" $x_1$ was linear, and both models seem to capture this. It is important to keep in mind that our restrictions in the mboost **allowed** for a non-linear estimate of $x_1$, but the estimate yielded is almost linear. 
+
+```{r, echo=FALSE, warning=FALSE}
+df_style_x1 <- data.frame(
+  x1 = 1:300,
+  x2 = 150,
+  x3 = 150
+)
+df_style_x1$y_true <- .1 * df_style_x1$x1 + 20/(1+ exp(-.1*(150 - 100))) + sqrt(150)
+df_style_x1$y_lm   <- predict(fit_lm,  newdata = df_style_x1)
+df_style_x1$y_gam  <- predict(fit_gam, newdata = df_style_x1)[, 1]
+
+df_style_x1_plot <- df_style_x1 %>% 
+  select(x1, y_true, y_lm, y_gam) %>% 
+  gather(key, value, -x1) %>% 
+  mutate(key = ifelse(key=="y_gam", "MBOOST", key)) %>% 
+  mutate(key = ifelse(key=="y_lm", "Linear regression", key)) %>% 
+  mutate(key = ifelse(key=="y_true", "y, true value", key))
+
+ggplot(df_style_x1_plot) +
+  ggtitle("Stylized fit, x1") +
+  geom_path(aes(x=x1, y=value, color=key))
+```
+
+**Stylized fit: $x_2$**
+
+Before looking at $x_2$ and $x_3$ we just, once more, want to emphasize, that the assumptions made for all inputs in the mboost model where the same, but the model was still able to differentiate between the linear and the non-linear inputs.
+
+The true $x_2$ had both a threshold point and a saturation point. The out-of-the-box mboost fit gets pretty close to capturing this. The linear model does... not (surprised?).
+
+```{r, echo=FALSE, warning=FALSE}
+df_style_x2 <- data.frame(
+  x1 = 150,
+  x2 = 1:300,
+  x3 = 150
+)
+df_style_x2$y_true <- 20/(1+ exp(-.1*(df_style_x2$x2 - 100))) + .1 * 150 + sqrt(150)
+df_style_x2$y_lm   <- predict(fit_lm,  newdata = df_style_x2)
+df_style_x2$y_gam  <- predict(fit_gam, newdata = df_style_x2)[, 1]
+
+df_style_x2_plot <- df_style_x2 %>% 
+  select(x2, y_true, y_lm, y_gam) %>% 
+  gather(key, value, -x2) %>% 
+  mutate(key = ifelse(key=="y_gam", "MBOOST", key)) %>% 
+  mutate(key = ifelse(key=="y_lm", "Linear regression", key)) %>% 
+  mutate(key = ifelse(key=="y_true", "y, true value", key))
+
+ggplot(df_style_x2_plot) +
+  ggtitle("Stylized fit, x2") +
+  geom_path(aes(x=x2, y=value, color=key))
+```
+
+**Stylized fit: $x_3$**
+
+The true $x_3$ was a concave function. We see, once more, that mboost gets pretty close to capturing this.
+
+```{r, echo=FALSE, warning=FALSE}
+df_style_x3 <- data.frame(
+  x1 = 150,
+  x2 = 150,
+  x3 = 1:300
+)
+df_style_x3$y_true <- sqrt(df_style_x3$x3) + .1 * 150 + 20/(1+ exp(-.1*(150 - 100)))
+df_style_x3$y_lm   <- predict(fit_lm,  newdata = df_style_x3)
+df_style_x3$y_gam  <- predict(fit_gam, newdata = df_style_x3)[, 1]
+
+df_style_x3_plot <- df_style_x3 %>% 
+  select(x3, y_true, y_lm, y_gam) %>% 
+  gather(key, value, -x3) %>% 
+  mutate(key = ifelse(key=="y_gam", "MBOOST", key)) %>% 
+  mutate(key = ifelse(key=="y_lm", "Linear regression", key)) %>% 
+  mutate(key = ifelse(key=="y_true", "y, true value", key))
+
+ggplot(df_style_x3_plot) +
+  ggtitle("Stylized fit, x3") +
+  geom_path(aes(x=x3, y=value, color=key))
+```
+
+# Wrappin' up
+
+The example in this post was very simple (perhaps too simple), but the key take away is, that the [mboost](https://CRAN.R-project.org/package=mboost) package, with very little tweeks, helped us identify which inputs behaved in a non-linear way, and which did not. As a pure diagnostics tool, this is immensily helpfull for any analyst.
+
+And we've only just scratched the surface of what this package can do. For a further dive into this wonderful world of splines, we recommend checking out the documentation supplied by the authors them selves at [CRAN](https://CRAN.R-project.org/package=mboost).
+
+Happy modelling!
