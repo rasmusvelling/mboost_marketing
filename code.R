@@ -1,3 +1,5 @@
+library(tidyverse)
+
 ## Saturating vs non saturating plot
 
 ggplot(data = data.frame(
@@ -22,9 +24,8 @@ ggplot(data = data.frame(
   labs(title="Channel with minimum-threshold for effect" , x = "Dose (impressions)", y = "Effect", colour="") +
   theme(legend.position = "bottom")
 
-## Simulating data 
-library(tidyverse)
 
+## Simulating data for test
 df <- data.frame(
   x1 = runif(1000, 0, 300),
   x2 = runif(1000, 0, 300),
@@ -44,6 +45,7 @@ df_test  <- df[test, ] %>% select(-e)
 # Estimation
 fit_lm <- lm(y ~ x1 + x2 + x3, data = df_train)
 
+library(mboost)
 fit_gam <- mboost::gamboost(
   formula = as.formula(paste0(
     "y ~ bbs(x1, knots=4, degree=3) + ",
